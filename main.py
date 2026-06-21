@@ -4,6 +4,7 @@ Usage: python main.py <source_channel_id> <dest_channel_id>
 """
 
 import asyncio
+import re
 import json
 import os
 import sys
@@ -69,6 +70,15 @@ async def post(session, url, headers, **kwargs):
         r.raise_for_status()
         return await r.json()
 
+async def fix_ts(ts):
+    """Chuyển ISO timestamp sang format Discord chấp nhận."""
+    if not ts:
+        return None
+    # Bỏ microseconds và timezone, giữ format YYYY-MM-DDTHH:MM:SS.000Z
+    ts = re.sub(r'\+00:00$', 'Z', ts)
+    ts = re.sub(r'\.\d+Z', '.000Z', ts)
+    return ts
+
 async def fetch_all_threads(session, channel_id):
     """Lấy tất cả threads dùng archive_timestamp để paginate đúng."""
     threads = []
@@ -87,10 +97,9 @@ async def fetch_all_threads(session, channel_id):
             if not data.get("has_more", False) or not batch:
                 break
 
-            # Dùng archive_timestamp của thread cuối để paginate
             last = batch[-1]
             ts = last.get("thread_metadata", {}).get("archive_timestamp", "")
-            before = ts.replace("+00:00", ".000Z") if ts else None
+            before = await fix_ts(ts)
             if not before:
                 break
 
@@ -113,7 +122,7 @@ async def fetch_all_threads(session, channel_id):
                 break
             last = batch[-1]
             ts = last.get("thread_metadata", {}).get("archive_timestamp", "")
-            before = ts.replace("+00:00", ".000Z") if ts else None
+            before = await fix_ts(ts)
             if not before:
                 break
             await asyncio.sleep(0.3)
