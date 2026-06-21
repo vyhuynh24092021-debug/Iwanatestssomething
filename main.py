@@ -11,12 +11,19 @@ import aiohttp
 import aiofiles
 from pathlib import Path
 from datetime import datetime
+try:
+    from mediafire.client import MediaFireClient
+    HAS_MEDIAFIRE = True
+except ImportError:
+    HAS_MEDIAFIRE = False
 
 with open("config.json", "r") as f:
     config = json.load(f)
 
 USER_TOKEN = config["user_token"]
 BOT_TOKEN = config["bot_token"]
+MF_EMAIL = config.get("mediafire_email", "")
+MF_PASSWORD = config.get("mediafire_password", "")
 DELAY_MSG = config.get("delay_between_messages", 1.0)
 DELAY_THREAD = config.get("delay_between_threads", 2.0)
 TEMP_DIR = Path(config.get("temp_dir", "temp"))
@@ -151,6 +158,35 @@ def cleanup_files(paths):
         except Exception:
             pass
 
+def upload_to_mediafire(filepath, filename):
+    """Upload file len Mediafire, tra ve link download."""
+    if not HAS_MEDIAFIRE:
+        print("  [!] Chua cai mediafire SDK. Chay: pip install mediafire --break-system-packages")
+        return None
+    if not MF_EMAIL or not MF_PASSWORD:
+        print("  [!] Chua co mediafire_email/mediafire_password trong config.json")
+        return None
+    try:
+        client = MediaFireClient()
+        client.login(email=MF_EMAIL, password=MF_PASSWORD, app_id="42511")
+        dest = f"mf:/{filename}"
+        client.upload_file(str(filepath), dest)
+        # Lay link
+        from mediafire import MediaFireApi
+        api = client._api
+        resp = api.file_get_links(quick_key=None, link_type="normal_download")
+        # Fallback: lay tu folder root
+        for item in client.get_folder_contents_iter("mf:/"):
+            from mediafire.client import File
+            if isinstance(item, File) and item.get("filename") == filename:
+                qk = item.get("quickkey")
+                if qk:
+                    return f"https://www.mediafire.com/file/{qk}/{filename}/file"
+        return None
+    except Exception as e:
+        print(f"  [!] Mediafire upload loi: {e}")
+        return None
+
 async def create_dest_thread(session, dest_channel_id, thread_name, content, files):
     """Tao thread moi. Neu co file, tao thread truoc roi gui file sau."""
     url = f"{DISCORD_API}/channels/{dest_channel_id}/threads"
@@ -164,15 +200,28 @@ async def create_dest_thread(session, dest_channel_id, thread_name, content, fil
     return result
 
 async def send_file(session, thread_id, content, filepath, filename):
-    """Gui 1 file duy nhat."""
+    """Gui 1 file. Fallback Mediafire neu 413."""
     url = f"{DISCORD_API}/channels/{thread_id}/messages"
-    form = aiohttp.FormData()
-    payload = {"content": content or "\u200b"}
-    form.add_field("payload_json", json.dumps(payload), content_type="application/json")
-    async with aiofiles.open(filepath, "rb") as f:
-        data = await f.read()
-    form.add_field("files[0]", data, filename=filename)
-    await post(session, url, bot_headers(), data=form)
+    try:
+        form = aiohttp.FormData()
+        payload = {"content": content or "\u200b"}
+        form.add_field("payload_json", json.dumps(payload), content_type="application/json")
+        async with aiofiles.open(filepath, "rb") as f:
+            data = await f.read()
+        form.add_field("files[0]", data, filename=filename)
+        await post(session, url, bot_headers(), data=form)
+    except Exception as e:
+        if "413" in str(e):
+            print(f"  [!] File qua lon cho Discord, upload Mediafire...")
+            mf_link = upload_to_mediafire(filepath, filename)
+            if mf_link:
+                msg = f"{content}\n{mf_link}".strip() if content else mf_link
+                await post(session, url, bot_headers(), json={"content": msg})
+                print(f"  [Mediafire] {filename} -> {mf_link}")
+            else:
+                print(f"  [!] Khong upload duoc Mediafire, bo qua file nay")
+        else:
+            raise
 
 async def send_message(session, thread_id, content, files):
     """Gui tin nhan + file vao thread dich, tung file 1."""
