@@ -12,9 +12,6 @@ import aiofiles
 from pathlib import Path
 from datetime import datetime
 
-# ──────────────────────────────────────────────
-# Load config
-# ──────────────────────────────────────────────
 with open("config.json", "r") as f:
     config = json.load(f)
 
@@ -26,12 +23,8 @@ TEMP_DIR = Path(config.get("temp_dir", "temp"))
 TEMP_DIR.mkdir(exist_ok=True)
 
 STATE_FILE = Path("state.json")
-
 DISCORD_API = "https://discord.com/api/v10"
 
-# ──────────────────────────────────────────────
-# State management (resume support)
-# ──────────────────────────────────────────────
 def load_state():
     if STATE_FILE.exists():
         with open(STATE_FILE, "r") as f:
@@ -42,16 +35,12 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-# ──────────────────────────────────────────────
-# HTTP helpers
-# ──────────────────────────────────────────────
 def user_headers():
     return {
         "Authorization": USER_TOKEN,
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "X-Discord-Locale": "en-US",
-        # Không gửi X-Super-Properties để tránh track client
     }
 
 def bot_headers():
@@ -79,42 +68,52 @@ async def post(session, url, headers, **kwargs):
         r.raise_for_status()
         return await r.json()
 
-# ──────────────────────────────────────────────
-# Fetch threads in a forum channel (selfbot)
-# ──────────────────────────────────────────────
-async def fetch_active_threads(session, channel_id):
-    """Lấy active threads trong forum channel."""
-    guild_id = await get_guild_id(session, channel_id)
-    url = f"{DISCORD_API}/guilds/{guild_id}/threads/active"
-    data = await get(session, url, user_headers())
-    threads = [t for t in data.get("threads", []) if t["parent_id"] == str(channel_id)]
-    return threads
-
-async def fetch_archived_threads(session, channel_id):
-    """Lấy archived threads trong forum channel."""
-    threads = []
-    before = None
-    while True:
-        url = f"{DISCORD_API}/channels/{channel_id}/threads/archived/public?limit=100"
-        if before:
-            url += f"&before={before}"
-        data = await get(session, url, user_headers())
-        batch = data.get("threads", [])
-        threads.extend(batch)
-        if not data.get("has_more", False) or not batch:
-            break
-        before = batch[-1]["id"]
-        await asyncio.sleep(0.5)
-    return threads
-
 async def get_guild_id(session, channel_id):
     url = f"{DISCORD_API}/channels/{channel_id}"
     data = await get(session, url, user_headers())
     return data["guild_id"]
 
-# ──────────────────────────────────────────────
-# Fetch messages in a thread (selfbot)
-# ──────────────────────────────────────────────
+async def fetch_all_threads(session, channel_id):
+    """Lấy tất cả threads (active + archived) qua endpoint public."""
+    threads = []
+    before = None
+
+    # Archived public threads
+    while True:
+        url = f"{DISCORD_API}/channels/{channel_id}/threads/archived/public?limit=100"
+        if before:
+            url += f"&before={before}"
+        try:
+            data = await get(session, url, user_headers())
+            batch = data.get("threads", [])
+            threads.extend(batch)
+            if not data.get("has_more", False) or not batch:
+                break
+            before = batch[-1]["id"]
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"  [!] Lỗi lấy archived threads: {e}")
+            break
+
+    # Archived private threads (nếu có quyền)
+    before = None
+    while True:
+        url = f"{DISCORD_API}/channels/{channel_id}/threads/archived/private?limit=100"
+        if before:
+            url += f"&before={before}"
+        try:
+            data = await get(session, url, user_headers())
+            batch = data.get("threads", [])
+            threads.extend(batch)
+            if not data.get("has_more", False) or not batch:
+                break
+            before = batch[-1]["id"]
+            await asyncio.sleep(0.5)
+        except Exception:
+            break  # Không có quyền, bỏ qua
+
+    return threads
+
 async def fetch_messages(session, thread_id):
     """Lấy toàn bộ tin nhắn trong thread, từ cũ đến mới."""
     messages = []
@@ -131,14 +130,10 @@ async def fetch_messages(session, thread_id):
         if len(batch) < 100:
             break
         await asyncio.sleep(0.5)
-    messages.reverse()  # cũ → mới
+    messages.reverse()
     return messages
 
-# ──────────────────────────────────────────────
-# Download attachments
-# ──────────────────────────────────────────────
 async def download_attachments(session, attachments, thread_id, msg_id):
-    """Tải file đính kèm về temp/, trả về list path."""
     paths = []
     for att in attachments:
         filename = f"{thread_id}_{msg_id}_{att['filename']}"
@@ -157,40 +152,26 @@ def cleanup_files(paths):
         except Exception:
             pass
 
-# ──────────────────────────────────────────────
-# Bot: tạo thread ở forum channel đích
-# ──────────────────────────────────────────────
 async def create_dest_thread(session, dest_channel_id, thread_name, first_message_content, files):
-    """Tạo thread mới ở forum channel đích với tin nhắn đầu tiên."""
     url = f"{DISCORD_API}/channels/{dest_channel_id}/threads"
-
     form = aiohttp.FormData()
     payload = {
         "name": thread_name,
-        "message": {
-            "content": first_message_content or "​"  # zero-width space nếu không có text
-        }
+        "message": {"content": first_message_content or "\u200b"}
     }
     form.add_field("payload_json", json.dumps(payload), content_type="application/json")
-
     for i, (filepath, filename) in enumerate(files):
         async with aiofiles.open(filepath, "rb") as f:
             data = await f.read()
         form.add_field(f"files[{i}]", data, filename=filename)
-
     result = await post(session, url, bot_headers(), data=form)
-    return result  # trả về thread object
+    return result
 
-# ──────────────────────────────────────────────
-# Bot: gửi tin nhắn vào thread đích
-# ──────────────────────────────────────────────
 async def send_message(session, thread_id, content, files):
-    """Gửi tin nhắn + file vào thread đích."""
     url = f"{DISCORD_API}/channels/{thread_id}/messages"
-
     if files:
         form = aiohttp.FormData()
-        payload = {"content": content or "​"}
+        payload = {"content": content or "\u200b"}
         form.add_field("payload_json", json.dumps(payload), content_type="application/json")
         for i, (filepath, filename) in enumerate(files):
             async with aiofiles.open(filepath, "rb") as f:
@@ -199,30 +180,24 @@ async def send_message(session, thread_id, content, files):
         await post(session, url, bot_headers(), data=form)
     else:
         if not content:
-            return  # bỏ qua tin nhắn trống
+            return
         payload = {"content": content}
         await post(session, url, bot_headers(), json=payload)
 
-# ──────────────────────────────────────────────
-# Clone một thread
-# ──────────────────────────────────────────────
 async def clone_thread(session, src_thread, dest_channel_id, state, state_key):
     thread_id = src_thread["id"]
     thread_name = src_thread["name"]
 
     print(f"\n[Thread] {thread_name} ({thread_id})")
 
-    # Lấy toàn bộ tin nhắn
     messages = await fetch_messages(session, thread_id)
     if not messages:
         print("  Không có tin nhắn, bỏ qua.")
         return
 
-    # Kiểm tra resume
     done_msgs = state.get(state_key, {}).get(thread_id, {}).get("done_messages", [])
     dest_thread_id = state.get(state_key, {}).get(thread_id, {}).get("dest_thread_id")
 
-    # Lọc tin nhắn chưa xử lý
     pending = [m for m in messages if m["id"] not in done_msgs]
     if not pending:
         print("  Đã clone xong thread này trước đó.")
@@ -235,12 +210,10 @@ async def clone_thread(session, src_thread, dest_channel_id, state, state_key):
         attachments = msg.get("attachments", [])
         embeds = msg.get("embeds", [])
 
-        # Tải file đính kèm
         files = []
         if attachments:
             files = await download_attachments(session, attachments, thread_id, msg["id"])
 
-        # Thêm link từ embed nếu không có file
         if embeds and not files:
             for embed in embeds:
                 if embed.get("url"):
@@ -248,66 +221,60 @@ async def clone_thread(session, src_thread, dest_channel_id, state, state_key):
 
         try:
             if i == 0 and not dest_thread_id:
-                # Tạo thread mới với tin nhắn đầu tiên
                 result = await create_dest_thread(session, dest_channel_id, thread_name, content, files)
                 dest_thread_id = result["id"]
                 print(f"  Tạo thread đích: {dest_thread_id}")
-
-                # Lưu state
                 if state_key not in state:
                     state[state_key] = {}
                 if thread_id not in state[state_key]:
                     state[state_key][thread_id] = {}
                 state[state_key][thread_id]["dest_thread_id"] = dest_thread_id
             else:
-                # Gửi tin nhắn tiếp theo
                 await send_message(session, dest_thread_id, content, files)
 
-            # Xóa file tạm
             cleanup_files(files)
 
-            # Lưu progress
             if state_key not in state:
                 state[state_key] = {}
             if thread_id not in state[state_key]:
                 state[state_key][thread_id] = {"done_messages": []}
+            if "done_messages" not in state[state_key][thread_id]:
+                state[state_key][thread_id]["done_messages"] = []
             state[state_key][thread_id]["done_messages"].append(msg["id"])
             save_state(state)
 
-            print(f"  [{i+1}/{len(pending)}] ✓ msg {msg['id']}")
+            print(f"  [{i+1}/{len(pending)}] v msg {msg['id']}")
             await asyncio.sleep(DELAY_MSG)
 
         except Exception as e:
             cleanup_files(files)
-            print(f"  [!] Lỗi msg {msg['id']}: {e}")
+            print(f"  [!] Loi msg {msg['id']}: {e}")
             await asyncio.sleep(2)
 
-# ──────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────
 async def main(src_channel_id, dest_channel_id):
     state = load_state()
     state_key = f"{src_channel_id}->{dest_channel_id}"
 
     print(f"=== Discord Forum Cloner ===")
-    print(f"Nguồn : {src_channel_id}")
-    print(f"Đích  : {dest_channel_id}")
-    print(f"Bắt đầu: {datetime.now().strftime('%H:%M:%S')}\n")
+    print(f"Nguon : {src_channel_id}")
+    print(f"Dich  : {dest_channel_id}")
+    print(f"Bat dau: {datetime.now().strftime('%H:%M:%S')}\n")
 
     async with aiohttp.ClientSession() as session:
-        # Lấy tất cả threads (active + archived)
-        print("Đang lấy danh sách threads...")
-        active = await fetch_active_threads(session, src_channel_id)
-        archived = await fetch_archived_threads(session, src_channel_id)
-        all_threads = active + archived
-        print(f"Tìm thấy {len(all_threads)} threads ({len(active)} active, {len(archived)} archived)\n")
+        print("Dang lay danh sach threads...")
+        all_threads = await fetch_all_threads(session, src_channel_id)
+        print(f"Tim thay {len(all_threads)} threads\n")
+
+        if not all_threads:
+            print("[!] Khong tim thay thread nao. Kiem tra lai channel ID va quyen truy cap.")
+            return
 
         for idx, thread in enumerate(all_threads):
-            print(f"─── Thread {idx+1}/{len(all_threads)} ───")
+            print(f"--- Thread {idx+1}/{len(all_threads)} ---")
             await clone_thread(session, thread, dest_channel_id, state, state_key)
             await asyncio.sleep(DELAY_THREAD)
 
-    print(f"\n=== Hoàn thành! {datetime.now().strftime('%H:%M:%S')} ===")
+    print(f"\n=== Hoan thanh! {datetime.now().strftime('%H:%M:%S')} ===")
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
