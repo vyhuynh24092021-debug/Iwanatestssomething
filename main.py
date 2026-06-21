@@ -70,17 +70,8 @@ async def post(session, url, headers, **kwargs):
         r.raise_for_status()
         return await r.json()
 
-async def fix_ts(ts):
-    """Chuyển ISO timestamp sang format Discord chấp nhận."""
-    if not ts:
-        return None
-    # Bỏ microseconds và timezone, giữ format YYYY-MM-DDTHH:MM:SS.000Z
-    ts = re.sub(r'\+00:00$', 'Z', ts)
-    ts = re.sub(r'\.\d+Z', '.000Z', ts)
-    return ts
-
 async def fetch_all_threads(session, channel_id):
-    """Lấy tất cả threads dùng archive_timestamp để paginate đúng."""
+    """Lấy tất cả threads - dùng archive_timestamp đúng format."""
     threads = []
     before = None
 
@@ -97,11 +88,14 @@ async def fetch_all_threads(session, channel_id):
             if not data.get("has_more", False) or not batch:
                 break
 
+            # Lấy archive_timestamp, convert sang format đúng
             last = batch[-1]
             ts = last.get("thread_metadata", {}).get("archive_timestamp", "")
-            before = await fix_ts(ts)
-            if not before:
+            if not ts:
                 break
+            # Discord cần format: 2025-10-22T01:33:58.687Z (không có +00:00)
+            ts = ts.replace("+00:00", "Z")
+            before = ts
 
             await asyncio.sleep(0.3)
         except Exception as e:
@@ -122,9 +116,10 @@ async def fetch_all_threads(session, channel_id):
                 break
             last = batch[-1]
             ts = last.get("thread_metadata", {}).get("archive_timestamp", "")
-            before = await fix_ts(ts)
-            if not before:
+            if not ts:
                 break
+            ts = ts.replace("+00:00", "Z")
+            before = ts
             await asyncio.sleep(0.3)
         except Exception:
             break
