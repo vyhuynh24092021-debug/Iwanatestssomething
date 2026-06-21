@@ -89,7 +89,8 @@ async def fetch_all_threads(session, channel_id):
 
             # Dùng archive_timestamp của thread cuối để paginate
             last = batch[-1]
-            before = last.get("thread_metadata", {}).get("archive_timestamp")
+            ts = last.get("thread_metadata", {}).get("archive_timestamp", "")
+            before = ts.replace("+00:00", ".000Z") if ts else None
             if not before:
                 break
 
@@ -111,7 +112,8 @@ async def fetch_all_threads(session, channel_id):
             if not data.get("has_more", False) or not batch:
                 break
             last = batch[-1]
-            before = last.get("thread_metadata", {}).get("archive_timestamp")
+            ts = last.get("thread_metadata", {}).get("archive_timestamp", "")
+            before = ts.replace("+00:00", ".000Z") if ts else None
             if not before:
                 break
             await asyncio.sleep(0.3)
