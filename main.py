@@ -186,7 +186,7 @@ def upload_to_mediafire(filepath, filename):
         print(f"  [!] Mediafire upload loi: {e}")
         return None
 
-async def create_dest_thread(session, dest_channel_id, thread_name, content, files=none):
+async def create_dest_thread(session, dest_channel_id, thread_name, content, files=None):
     """Tao thread moi. Neu co file, tao thread truoc roi gui file sau."""
     url = f"{DISCORD_API}/channels/{dest_channel_id}/threads"
     form = aiohttp.FormData()
