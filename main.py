@@ -100,7 +100,6 @@ async def fetch_all_threads(session, channel_id):
             ts = batch[-1].get("thread_metadata", {}).get("archive_timestamp", "")
             if not ts:
                 break
-            # Fix: doi +00:00 thanh Z
             before = ts.replace("+00:00", "Z")
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -135,7 +134,7 @@ async def download_file(session, url, filepath, retries=3):
                 r.raise_for_status()
                 async with aiofiles.open(filepath, "wb") as f:
                     await f.write(await r.read())
-            return True
+                return True
         except Exception as e:
             if attempt < retries - 1:
                 await asyncio.sleep(2 ** attempt)
@@ -186,15 +185,30 @@ def upload_to_mediafire(filepath, filename):
         print(f"  [!] Mediafire upload loi: {e}")
         return None
 
+# ===== SỬA HÀM CREATE_DEST_THREAD =====
 async def create_dest_thread(session, dest_channel_id, thread_name, content, files=None):
-    """Tao thread moi. Neu co file, tao thread truoc roi gui file sau."""
+    """Tạo thread mới. Nếu có files, gửi kèm trong starter message để Discord lấy thumbnail."""
     url = f"{DISCORD_API}/channels/{dest_channel_id}/threads"
     form = aiohttp.FormData()
-    payload = {
-        "name": thread_name,
-        "message": {"content": content or "\u200b"}
-    }
+
+    # Xây dựng payload
+    payload = {"name": thread_name}
+    msg_payload = {"content": content or "\u200b"}
+    if files:
+        # Tạo mảng attachments cho Discord
+        attachments = [{"id": i, "filename": filename} for i, (_, filename) in enumerate(files)]
+        msg_payload["attachments"] = attachments
+    payload["message"] = msg_payload
+
     form.add_field("payload_json", json.dumps(payload), content_type="application/json")
+
+    # Thêm các file vào form nếu có
+    if files:
+        for i, (filepath, filename) in enumerate(files):
+            async with aiofiles.open(filepath, "rb") as f:
+                data = await f.read()
+            form.add_field(f"files[{i}]", data, filename=filename)
+
     result = await post(session, url, bot_headers(), data=form)
     return result
 
@@ -217,8 +231,6 @@ async def send_file(session, thread_id, content, filepath, filename):
                 msg = f"{content}\n{mf_link}".strip() if content else mf_link
                 await post(session, url, bot_headers(), json={"content": msg})
                 print(f"  [Mediafire] {filename} -> {mf_link}")
-            else:
-                print(f"  [!] Khong upload duoc Mediafire, bo qua file nay")
         else:
             raise
 
@@ -226,7 +238,6 @@ async def send_message(session, thread_id, content, files):
     """Gui tin nhan + file vao thread dich, tung file 1."""
     url = f"{DISCORD_API}/channels/{thread_id}/messages"
     if files:
-        # Gui tung file 1 de tranh 413
         for idx, (filepath, filename) in enumerate(files):
             msg_content = (content or "\u200b") if idx == 0 else "\u200b"
             await send_file(session, thread_id, msg_content, filepath, filename)
@@ -237,6 +248,7 @@ async def send_message(session, thread_id, content, files):
             return
         await post(session, url, bot_headers(), json={"content": content})
 
+# ===== SỬA HÀM CLONE_THREAD =====
 async def clone_thread(session, src_thread, dest_channel_id, state, state_key):
     thread_id = src_thread["id"]
     thread_name = src_thread["name"]
@@ -256,7 +268,7 @@ async def clone_thread(session, src_thread, dest_channel_id, state, state_key):
         print("  Da clone xong thread nay truoc do.")
         return
 
-    # Bo loc: chi lay tin cua chu thread
+    # Lọc: chỉ giữ lại tin của chủ thread hoặc có file
     filtered = []
     for i, m in enumerate(pending):
         author_id = m.get("author", {}).get("id", "")
@@ -266,12 +278,83 @@ async def clone_thread(session, src_thread, dest_channel_id, state, state_key):
             filtered.append((i, m))
 
     print(f"  Tong: {len(messages)} tin | Sau loc: {len(filtered)} tin")
+    if not filtered:
+        print("  Khong co tin nao can clone.")
+        return
 
-    for idx, (i, msg) in enumerate(filtered):
+    # ---- XỬ LÝ TẠO THREAD ----
+    start_idx = 0  # chỉ số bắt đầu vòng lặp
+    if not dest_thread_id and filtered:
+        first_i, first_msg = filtered[0]
+        first_attachments = first_msg.get("attachments", [])
+        # Kiểm tra xem có ảnh không (content_type bắt đầu bằng "image/")
+        image_attachments = [att for att in first_attachments if att.get("content_type", "").startswith("image/")]
+
+        if image_attachments:
+            # Tải các file ảnh về
+            image_files = await download_attachments(session, image_attachments, thread_id, first_msg["id"])
+            try:
+                # Tạo thread với content + ảnh ngay trong starter message
+                result = await create_dest_thread(
+                    session,
+                    dest_channel_id,
+                    thread_name,
+                    first_msg.get("content", ""),
+                    files=image_files
+                )
+                dest_thread_id = result["id"]
+                print(f"  Tao thread dich (voi anh thumbnail): {dest_thread_id}")
+
+                # Lưu dest_thread_id vào state
+                if state_key not in state:
+                    state[state_key] = {}
+                if thread_id not in state[state_key]:
+                    state[state_key][thread_id] = {}
+                state[state_key][thread_id]["dest_thread_id"] = dest_thread_id
+
+                # Đánh dấu tin nhắn đầu tiên đã được xử lý (vì đã gửi kèm)
+                if "done_messages" not in state[state_key][thread_id]:
+                    state[state_key][thread_id]["done_messages"] = []
+                state[state_key][thread_id]["done_messages"].append(first_msg["id"])
+                save_state(state)
+
+                start_idx = 1  # bỏ qua tin nhắn đầu trong vòng lặp tiếp theo
+            except Exception as e:
+                print(f"  [!] Loi tao thread: {e}")
+                raise
+            finally:
+                cleanup_files(image_files)
+        else:
+            # Không có ảnh → tạo thread chỉ với content (giữ nguyên cách cũ)
+            try:
+                result = await create_dest_thread(
+                    session,
+                    dest_channel_id,
+                    thread_name,
+                    first_msg.get("content", "")
+                )
+                dest_thread_id = result["id"]
+                print(f"  Tao thread dich: {dest_thread_id}")
+
+                if state_key not in state:
+                    state[state_key] = {}
+                if thread_id not in state[state_key]:
+                    state[state_key][thread_id] = {}
+                state[state_key][thread_id]["dest_thread_id"] = dest_thread_id
+                save_state(state)
+
+                # Không đánh dấu tin nhắn đầu là done, vòng lặp sẽ xử lý nó
+                start_idx = 0
+            except Exception as e:
+                print(f"  [!] Loi tao thread: {e}")
+                raise
+
+    # ---- VÒNG LẶP GỬI CÁC TIN NHẮN CÒN LẠI ----
+    for idx in range(start_idx, len(filtered)):
+        i, msg = filtered[idx]
         author_id = msg.get("author", {}).get("id", "")
         is_author = author_id == thread_author_id
-        # Neu la chu thread: lay ca content + file
-        # Neu nguoi khac: chi lay file, bo text
+
         content = msg.get("content", "") if is_author else ""
         attachments = msg.get("attachments", [])
         embeds = msg.get("embeds", [])
@@ -280,48 +363,46 @@ async def clone_thread(session, src_thread, dest_channel_id, state, state_key):
         if attachments:
             files = await download_attachments(session, attachments, thread_id, msg["id"])
 
+        # Nếu có embed và không có file/content, lấy URL từ embed
         if embeds and not files and not content:
             for embed in embeds:
                 if embed.get("url"):
                     content = (content + "\n" + embed["url"]).strip()
 
         if not content and not files:
-            if state_key not in state: state[state_key] = {}
-            if thread_id not in state[state_key]: state[state_key][thread_id] = {"done_messages": []}
+            # Tin nhắn rỗng → đánh dấu đã xử lý và bỏ qua
+            if state_key not in state:
+                state[state_key] = {}
+            if thread_id not in state[state_key]:
+                state[state_key][thread_id] = {"done_messages": []}
+            if "done_messages" not in state[state_key][thread_id]:
+                state[state_key][thread_id]["done_messages"] = []
             state[state_key][thread_id]["done_messages"].append(msg["id"])
             save_state(state)
             continue
 
         try:
-            if not dest_thread_id:
-                # Tao thread truoc (khong kem file de tranh 413)
-                result = await create_dest_thread(session, dest_channel_id, thread_name, content if not files else "")
-                dest_thread_id = result["id"]
-                print(f"  Tao thread dich: {dest_thread_id}")
-                if state_key not in state: state[state_key] = {}
-                if thread_id not in state[state_key]: state[state_key][thread_id] = {}
-                state[state_key][thread_id]["dest_thread_id"] = dest_thread_id
-                # Gui file sau neu co
-                if files:
-                    await send_message(session, dest_thread_id, content, files)
-            else:
-                await send_message(session, dest_thread_id, content, files)
+            # Gửi tin nhắn (có thể kèm file)
+            await send_message(session, dest_thread_id, content, files)
 
-            cleanup_files(files)
-
-            if state_key not in state: state[state_key] = {}
-            if thread_id not in state[state_key]: state[state_key][thread_id] = {"done_messages": []}
-            if "done_messages" not in state[state_key][thread_id]: state[state_key][thread_id]["done_messages"] = []
+            # Cập nhật done_messages
+            if state_key not in state:
+                state[state_key] = {}
+            if thread_id not in state[state_key]:
+                state[state_key][thread_id] = {}
+            if "done_messages" not in state[state_key][thread_id]:
+                state[state_key][thread_id]["done_messages"] = []
             state[state_key][thread_id]["done_messages"].append(msg["id"])
             save_state(state)
 
             print(f"  [{idx+1}/{len(filtered)}] v msg {msg['id']}")
             await asyncio.sleep(DELAY_MSG)
-
         except Exception as e:
             cleanup_files(files)
             print(f"  [!] Loi msg {msg['id']}: {e}")
             await asyncio.sleep(2)
+        finally:
+            cleanup_files(files)
 
 async def main(src_channel_id, dest_channel_id):
     state = load_state()
