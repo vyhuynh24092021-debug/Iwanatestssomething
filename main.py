@@ -196,18 +196,17 @@ async def create_dest_thread(session, dest_channel_id, thread_name, content, fil
 async def send_message(session, thread_id, content, files):
     url = f"{DISCORD_API}/channels/{thread_id}/messages"
     if files:
-        batches = [files[i:i+10] for i in range(0, len(files), 10)]
-        for batch_idx, batch in enumerate(batches):
+        # Gửi từng file riêng lẻ để tránh 413
+        for idx, (filepath, filename) in enumerate(files):
             form = aiohttp.FormData()
-            payload = {"content": (content or "\u200b") if batch_idx == 0 else "\u200b"}
+            payload = {"content": (content or "\u200b") if idx == 0 else "\u200b"}
             form.add_field("payload_json", json.dumps(payload), content_type="application/json")
-            for i, (filepath, filename) in enumerate(batch):
-                async with aiofiles.open(filepath, "rb") as f:
-                    data = await f.read()
-                form.add_field(f"files[{i}]", data, filename=filename)
+            async with aiofiles.open(filepath, "rb") as f:
+                data = await f.read()
+            form.add_field("files[0]", data, filename=filename)
             await post(session, url, bot_headers(), data=form)
-            if batch_idx < len(batches) - 1:
-                await asyncio.sleep(0.8)
+            if idx < len(files) - 1:
+                await asyncio.sleep(0.5)
     else:
         if not content:
             return
