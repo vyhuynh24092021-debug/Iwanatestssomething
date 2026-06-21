@@ -11,6 +11,8 @@ import aiohttp
 import aiofiles
 from pathlib import Path
 from datetime import datetime
+import warnings, logging
+logging.getLogger("mediafire").setLevel(logging.ERROR)
 try:
     from mediafire.client import MediaFireClient
     HAS_MEDIAFIRE = True
