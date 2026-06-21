@@ -167,22 +167,19 @@ def upload_to_mediafire(filepath, filename):
         print("  [!] Chua co mediafire_email/mediafire_password trong config.json")
         return None
     try:
+        from mediafire.client import MediaFireClient, File
         client = MediaFireClient()
         client.login(email=MF_EMAIL, password=MF_PASSWORD, app_id="42511")
         dest = f"mf:/{filename}"
         client.upload_file(str(filepath), dest)
-        # Lay link
-        from mediafire import MediaFireApi
-        api = client._api
-        resp = api.file_get_links(quick_key=None, link_type="normal_download")
-        # Fallback: lay tu folder root
+        # Lay link tu folder root
         for item in client.get_folder_contents_iter("mf:/"):
-            from mediafire.client import File
             if isinstance(item, File) and item.get("filename") == filename:
                 qk = item.get("quickkey")
                 if qk:
                     return f"https://www.mediafire.com/file/{qk}/{filename}/file"
-        return None
+        # Fallback neu khong tim thay
+        return f"https://www.mediafire.com/?{filename}"
     except Exception as e:
         print(f"  [!] Mediafire upload loi: {e}")
         return None
