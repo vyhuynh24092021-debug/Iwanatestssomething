@@ -1,33 +1,66 @@
 """
-Bộ lọc tin nhắn - chỉnh sửa tại đây để thay đổi điều kiện lọc
+Message filtering logic for Discord Cloner
+Chỉnh sửa các hàm này để tùy chỉnh điều kiện lọc tin nhắn
 """
 
-def should_include(msg, thread_author_id):
-    """
-    Trả về True nếu tin nhắn cần được clone.
+class MessageFilter:
+    """Bộ lọc tin nhắn dựa trên chế độ clone"""
     
-    Điều kiện hiện tại:
-    - Tin đầu tiên của thread (index 0) -> luôn lấy
-    - Tin của chủ thread -> lấy
-    - Tin của người khác có file/ảnh -> lấy file nhưng bỏ text
-    - Tin text thuần của người khác -> bỏ
-    """
-    author_id = msg.get("author", {}).get("id", "")
-    is_thread_author = author_id == thread_author_id
-    has_attachments = bool(msg.get("attachments"))
+    FORUM_MODE = "forum"      # Forum threads - có chủ thread
+    CHANNEL_MODE = "channel"  # Regular channels - không có chủ thread
     
-    return is_thread_author or has_attachments
+    def __init__(self, mode):
+        self.mode = mode
+    
+    def should_include(self, msg, thread_author_id=None):
+        """Xác định tin nhắn có nên được clone không"""
+        if self.mode == self.FORUM_MODE:
+            return self._forum_filter(msg, thread_author_id)
+        else:  # CHANNEL_MODE
+            return self._channel_filter(msg)
+    
+    def _forum_filter(self, msg, thread_author_id):
+        """Lọc cho forum threads: chỉ chủ thread + file đính kèm"""
+        author_id = msg.get("author", {}).get("id", "")
+        is_author = author_id == thread_author_id
+        has_attachments = bool(msg.get("attachments"))
+        return is_author or has_attachments
+    
+    def _channel_filter(self, msg):
+        """Lọc cho regular channels: lấy tất cả"""
+        return True
+    
+    def get_content(self, msg, thread_author_id=None):
+        """Lấy nội dung tin nhắn dựa trên chế độ"""
+        if self.mode == self.FORUM_MODE:
+            return self._get_forum_content(msg, thread_author_id)
+        else:  # CHANNEL_MODE
+            return self._get_channel_content(msg)
+    
+    def _get_forum_content(self, msg, thread_author_id):
+        """
+        Forum: nếu chủ thread → lấy content + files
+               nếu người khác → chỉ lấy files, bỏ text
+        """
+        author_id = msg.get("author", {}).get("id", "")
+        is_author = author_id == thread_author_id
+        
+        content = msg.get("content", "") if is_author else ""
+        return content
+    
+    def _get_channel_content(self, msg):
+        """Channel: lấy toàn bộ content"""
+        return msg.get("content", "")
 
-def filter_content(msg, thread_author_id):
-    """
-    Trả về (content, keep_attachments).
-    Nếu không phải chủ thread: bỏ text, chỉ giữ file.
-    """
-    author_id = msg.get("author", {}).get("id", "")
-    is_thread_author = author_id == thread_author_id
-    
-    if is_thread_author:
-        return msg.get("content", ""), True
-    else:
-        # Người khác: bỏ text, chỉ lấy file
-        return "", True
+
+# Preset filters có thể mở rộng
+FILTERS = {
+    "forum_author_only": {
+        "name": "Forum - Chỉ chủ thread",
+        "mode": MessageFilter.FORUM_MODE
+    },
+    "channel_all": {
+        "name": "Channel - Tất cả tin nhắn",
+        "mode": MessageFilter.CHANNEL_MODE
+    }
+}
