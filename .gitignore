@@ -1,6 +1,14 @@
 config.json
-state.json
 temp/
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
+.DS_Store
+*.log
+.venv/
+venv/
+env/
+clone_state.db
+clone_state.db-shm
+clone_state.db-wal
