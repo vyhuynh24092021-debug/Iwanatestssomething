@@ -8,11 +8,11 @@ import json
 import os
 import sys
 import logging
+import sqlite3
 import aiohttp
 import aiofiles
 from pathlib import Path
 from datetime import datetime
-import sqlite3
 
 from filter import MessageFilter
 from mediafire_uploader import MediaFireUploader
@@ -24,14 +24,12 @@ from discord_api import (
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("discord_cloner")
 
 # Suppress mediafire warnings
 logging.getLogger("mediafire").setLevel(logging.ERROR)
-
-
 
 
 class StateManager:
@@ -83,15 +81,6 @@ class StateManager:
                 (src_channel, dest_channel)
             ).fetchone()
             return result[0] if result else 0
-    
-    def clear_session(self, src_channel, dest_channel):
-        """Clear session data"""
-        with sqlite3.connect(self.db_file) as conn:
-            conn.execute(
-                "DELETE FROM clones WHERE src_channel=? AND dest_channel=?",
-                (src_channel, dest_channel)
-            )
-            conn.commit()
 
 
 class DiscordCloner:
@@ -112,12 +101,12 @@ class DiscordCloner:
         mf_password = self.config.get("mediafire_password", "")
         self.mf_uploader = MediaFireUploader(mf_email, mf_password)
         
-        self.mode = None  # "forum" hoặc "channel"
+        self.mode = None
         self.message_filter = None
         self.state = StateManager()
     
     def _load_config(self, config_file):
-        """Load config từ file"""
+        """Load config from file"""
         try:
             with open(config_file, "r") as f:
                 return json.load(f)
@@ -129,7 +118,7 @@ class DiscordCloner:
             sys.exit(1)
     
     async def _select_mode(self):
-        """Yêu cầu người dùng chọn chế độ"""
+        """Prompt user to select mode"""
         print("\n=== Discord Cloner - Mode Selection ===")
         print("1. Forum Channel (threads)")
         print("2. Regular Channel (messages)")
@@ -150,7 +139,7 @@ class DiscordCloner:
                 print("Invalid choice. Please enter 1 or 2.")
     
     async def _download_file(self, session, url, filepath, retries=3):
-        """Download file với retry"""
+        """Download file with retry"""
         for attempt in range(retries):
             try:
                 async with session.get(url) as r:
@@ -167,7 +156,7 @@ class DiscordCloner:
         return False
     
     async def _download_attachments(self, session, attachments, prefix):
-        """Download tất cả attachment"""
+        """Download all attachments"""
         paths = []
         for att in attachments:
             filename = f"{prefix}_{att['filename']}"
@@ -178,7 +167,7 @@ class DiscordCloner:
         return paths
     
     def _cleanup_files(self, paths):
-        """Xóa file tạm"""
+        """Clean up temp files"""
         for filepath, _ in paths:
             try:
                 os.remove(filepath)
@@ -186,7 +175,7 @@ class DiscordCloner:
                 pass
     
     async def _create_dest_thread(self, session, dest_channel_id, thread_name, content, files=None):
-        """Tạo thread mới (forum mode)"""
+        """Create new thread (forum mode)"""
         url = f"{DISCORD_API}/channels/{dest_channel_id}/threads"
         form = aiohttp.FormData()
         
@@ -207,11 +196,10 @@ class DiscordCloner:
         return result
     
     async def _send_message(self, session, channel_id, content, files=None):
-        """Gửi tin nhắn"""
+        """Send message to channel"""
         url = f"{DISCORD_API}/channels/{channel_id}/messages"
         
         if files:
-            # Gửi từng file riêng lẻ để tránh 413
             for idx, (filepath, filename) in enumerate(files):
                 msg_content = (content or "\u200b") if idx == 0 else "\u200b"
                 try:
@@ -224,7 +212,7 @@ class DiscordCloner:
                     await post(session, url, bot_headers(self.bot_token), data=form)
                 except Exception as e:
                     if "413" in str(e):
-                        logger.warning(f"File too large for Discord, uploading to Mediafire...")
+                        logger.warning(f"File too large, uploading to Mediafire...")
                         mf_link = self.mf_uploader.upload(filepath, filename)
                         if mf_link:
                             msg = f"{content}\n{mf_link}".strip() if content else mf_link
@@ -239,7 +227,7 @@ class DiscordCloner:
                 await post(session, url, bot_headers(self.bot_token), json={"content": content})
     
     async def _clone_forum_thread(self, session, src_thread, dest_channel_id, src_channel_id):
-        """Clone 1 forum thread"""
+        """Clone one forum thread"""
         thread_id = src_thread["id"]
         thread_name = src_thread["name"]
         
@@ -264,11 +252,10 @@ class DiscordCloner:
         
         logger.info(f"  Total: {len(messages)} | After filter: {len(filtered)}")
         
-        # Create dest thread
+        # Create dest thread with first message
         first_msg = filtered[0]
         content = self.message_filter.get_content(first_msg, thread_author_id)
         
-        # Tải ảnh từ first message để làm thumbnail
         attachments = first_msg.get("attachments", [])
         image_files = []
         if attachments:
@@ -282,13 +269,14 @@ class DiscordCloner:
             logger.info(f"  Created thread: {dest_thread_id}")
             
             self._cleanup_files(image_files)
+            self.state.mark_processed(str(src_channel_id), str(dest_channel_id), thread_id, first_msg["id"])
             
             # Send remaining messages
             for idx, msg in enumerate(filtered[1:], 1):
-            # Skip if already processed
-            if self.state.is_processed(str(src_channel_id), str(dest_channel_id), thread_id, msg['id']):
-                logger.info(f"  [{idx+1}/{len(filtered)}] ⊘ msg {msg['id']} (already processed)")
-                continue
+                if self.state.is_processed(str(src_channel_id), str(dest_channel_id), thread_id, msg["id"]):
+                    logger.info(f"  [{idx+1}/{len(filtered)}] ⊘ msg {msg['id']} (already processed)")
+                    continue
+                
                 content = self.message_filter.get_content(msg, thread_author_id)
                 attachments = msg.get("attachments", [])
                 
@@ -298,18 +286,18 @@ class DiscordCloner:
                 
                 if content or files:
                     await self._send_message(session, dest_thread_id, content, files)
-                    self.state.mark_processed(str(src_channel_id), str(dest_channel_id), thread_id, msg['id'])
+                    self.state.mark_processed(str(src_channel_id), str(dest_channel_id), thread_id, msg["id"])
                     logger.info(f"  [{idx+1}/{len(filtered)}] ✓ msg {msg['id']}")
                 
                 self._cleanup_files(files)
                 await asyncio.sleep(self.delay_msg)
         
         except Exception as e:
-            logger.error(f"  Error creating thread: {e}")
+            logger.error(f"  Error: {e}")
             self._cleanup_files(image_files)
     
     async def _clone_regular_channel(self, session, src_channel_id, dest_channel_id):
-        """Clone regular channel (tất cả messages)"""
+        """Clone regular channel (all messages)"""
         logger.info(f"Cloning channel {src_channel_id}")
         
         messages = await fetch_messages(session, self.user_token, src_channel_id)
@@ -320,6 +308,10 @@ class DiscordCloner:
         logger.info(f"Total messages: {len(messages)}")
         
         for idx, msg in enumerate(messages, 1):
+            if self.state.is_processed(str(src_channel_id), str(dest_channel_id), "", msg["id"]):
+                logger.info(f"  [{idx}/{len(messages)}] ⊘ msg {msg['id']} (already processed)")
+                continue
+            
             content = self.message_filter.get_content(msg)
             attachments = msg.get("attachments", [])
             
@@ -330,21 +322,21 @@ class DiscordCloner:
             if content or files:
                 try:
                     await self._send_message(session, dest_channel_id, content, files)
-                    self.state.mark_processed(str(src_channel_id), str(dest_channel_id), "", msg['id'])
+                    self.state.mark_processed(str(src_channel_id), str(dest_channel_id), "", msg["id"])
                     logger.info(f"  [{idx}/{len(messages)}] ✓ msg {msg['id']}")
                 except Exception as e:
-                    logger.error(f"  Error sending msg {msg['id']}: {e}")
+                    logger.error(f"  Error: {e}")
             
             self._cleanup_files(files)
             await asyncio.sleep(self.delay_msg)
     
     async def clone(self, src_channel_id, dest_channel_id):
-        # Show resume info
+        """Main clone function"""
+        await self._select_mode()
+        
         processed = self.state.get_processed_count(str(src_channel_id), str(dest_channel_id))
         if processed > 0:
             logger.warning(f"Resume: {processed} messages already cloned")
-        """Main clone function"""
-        await self._select_mode()
         
         logger.info("=== Discord Cloner ===")
         logger.info(f"Source: {src_channel_id}")
@@ -362,7 +354,7 @@ class DiscordCloner:
                     await self._clone_forum_thread(session, thread, dest_channel_id, src_channel_id)
                     await asyncio.sleep(self.delay_thread)
             
-            else:  # CHANNEL_MODE
+            else:
                 await self._clone_regular_channel(session, src_channel_id, dest_channel_id)
         
         logger.info(f"\n=== Completed! {datetime.now().strftime('%H:%M:%S')} ===")
