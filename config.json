@@ -1,7 +1,0 @@
-{
-  "user_token": "YOUR_USER_TOKEN_HERE",
-  "bot_token": "YOUR_BOT_TOKEN_HERE",
-  "delay_between_messages": 1.5,
-  "delay_between_threads": 3.0,
-  "temp_dir": "temp"
-}
